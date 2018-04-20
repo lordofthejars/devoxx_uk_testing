@@ -1,0 +1,193 @@
+= Service Virtualization
+:source-highlighter: highlightjs
+:icons: font
+
+[IMPORTANT]
+====
+The best way to guarantee that a test works is running it from build tool and not IDE.
+For this project means running `./gradlew clean test`
+====
+
+== Installing Services
+
+For this exercise we need two services, one called _villains_ and the other called _crimes_.
+
+To get the projects just execute next commands from terminal:
+
+villains:: `git clone https://github.com/arquillian-testing-microservices/villains-service.git`
+crimes:: `https://github.com/arquillian-testing-microservices/crimes-service.git`
+
+Then you can assemble both services:
+
+[source, bash]
+----
+$ > cd villains
+$ > ./gradlew clean assemble
+$ > cd ..
+$ > cd crimes
+$ > ./gradlew clean assemble
+$ > cd ..
+----
+
+Then it is time to write a test on villains service that verifies that it can consume messages from crimes service.
+So open _villains_ service in your favourite IDE.
+
+Let's create next test class in `src/test/java`:
+
+[source, java]
+.src/test/java/org/lordofthejars/villains/villain/VillainsVerticleTest.java
+----
+package org.lordofthejars.villains.villain;
+
+import io.vertx.core.DeploymentOptions;
+import io.vertx.core.Vertx;
+import io.vertx.core.json.JsonObject;
+import java.util.concurrent.CountDownLatch;
+import org.junit.BeforeClass;
+import org.junit.Test;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.CoreMatchers.hasItems;
+import static org.hamcrest.CoreMatchers.is;
+
+public class VillainsVerticleTest {
+
+    private static Vertx vertx;
+
+
+    @BeforeClass
+    public static void deployVerticle() throws InterruptedException {
+        final CountDownLatch waitVerticleDeployed = new CountDownLatch(1);
+
+        new Thread(() -> {
+            vertx = Vertx.vertx();
+            DeploymentOptions deploymentOptions = new DeploymentOptions().
+                setConfig(new JsonObject()
+                    .put("services.crimes.host", "localhost")
+                    .put("services.crimes.port", 8080));
+
+            vertx.deployVerticle(VillainsVerticle.class.getName(), deploymentOptions, event -> {
+                if (event.failed()) {
+                    throw new IllegalStateException("Cannot deploy Villains Verticle");
+                }
+                waitVerticleDeployed.countDown();
+            });
+        }).start();
+        waitVerticleDeployed.await();
+    }
+
+    @Test
+    public void should_get_villain_information() {
+        given()
+            .port(8081)
+            .when()
+            .get("villains/{villain}", "Gru")
+            .then()
+            .assertThat()
+            .body("name", is("Gru"))
+            .body("areaOfInfluence", is("Worldwide"))
+            .body("crimes.name", hasItems("Moon", "Times Square JumboTron"));
+
+    }
+
+}
+----
+
+Now if you run this test you get a connection error because crimes service is not avalable, so let's start crimes service.
+Go to crimes service directory and run:
+
+[source, bash]
+----
+$ > ./gradlew shadowJar
+$ > java -jar build/libs/crimes-service-1.0-SNAPSHOT.jar
+----
+
+Then run again the tests.
+
+Obviously this is one way of testing interaction but it has some drawbacks such as:
+
+* Villains needs to know how to deploy its providers (one or more), _crimes_ service in this example.
+* Providers can have at the same time other providers, so you will need to start them as well.
+* If provider have a database you might need to start it and prepare a dataset for the test.
+
+Let's isolate _crimes_ service using service virtualization with Hoverfly.
+
+First of all open `build.gradle` and add Hoverfly dependency in `dependencies` section.
+
+[source, groovy]
+.build.gradle
+----
+dependencies {
+    testCompile "io.specto:hoverfly-java:0.10.2"
+}
+----
+
+And modify previous test by adding next snippet before `@BeforeClass` annotation, so now it looks like:
+
+[source, java]
+.src/test/java/org/lordofthejars/villains/villain/VillainsVerticleTest.java
+----
+private static String RESPONSE = "[\n" // <1>
+        + "    {\n"
+        + "        \"name\": \"Moon\",\n"
+        + "        \"villain\": \"Gru\",\n"
+        + "        \"wiki\": \"https://en.wikipedia.org/wiki/Moon\"\n"
+        + "    },\n"
+        + "    {\n"
+        + "        \"name\": \"Times Square JumboTron\",\n"
+        + "        \"villain\": \"Gru\",\n"
+        + "        \"wiki\": \"https://en.wikipedia.org/wiki/One_Times_Square\"\n"
+        + "    }\n"
+        + "]";
+
+
+@ClassRule // <2>
+public static HoverflyRule hoverflyRule = HoverflyRule.inSimulationMode(dsl( // <3>
+    service("localhost:8080") // <4>
+        .get("/crimes/Gru") // <5>
+        .willReturn(success(RESPONSE, "application/json")) // <6>
+));
+----
+<1> Response of the call
+<2> JUnit Class rule
+<3> Hoverfly in simulate mode
+<4> Location where service might theorically be deployed. It can be any host.
+<5> Path to react
+<6> What response to send back
+
+Now, just stop the _crimes_ service that you started before in terminal to run the test, and re-run again the test.
+Tehre is no connection error, and Hoverfly proxy has just returned a canned response.
+
+Of course this is fine for services not developed yet, but what's happen if the serivce is already developed and deployed?
+Then it is not necessary to define all the API, you can capture the inputs and outputs from real service the first time you run the test, and use these captured data next time.
+
+WARNING: If you have this service deployed in production, you need to follow some of the steps that we will cover later in the workshop.
+
+So, let's see hoe *capture or simulate* mode works in Hoverfly.
+
+First of all start again _crimes_ service from your terminal:
+
+[source, bash]
+----
+$ > java -jar build/libs/crimes-service-1.0-SNAPSHOT.jar
+----
+
+And now let's change the configuration of `Hoverfly ClassRule` to:
+
+[source, java]
+.src/test/java/org/lordofthejars/villains/villain/VillainsVerticleTest.java
+----
+@ClassRule
+public static HoverflyRule hoverflyRule = HoverflyRule.inCaptureOrSimulationMode("simulation.json");
+----
+
+Now if you go to `src/test/resources/hoverfly` directory, you will see a fiel called `simulation.json` where the interaction has been recorded.
+
+Stop _crimes_ service that you started from terminal.
+
+And re-run again the test.
+Notice that now the test is still green although the _crimes_ service has been stopped.
+
+This is because Hoverfly detects that a simulation file is present in classpath, so instead of rerouting to real service, it just uses data that has been captured before.
+
+TIP: There is another mode in Hoverfly called `diff` which checks against the real service if simulated data is still valid. It can be used in some circumstances but not always is effective.

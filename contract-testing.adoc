@@ -1,0 +1,289 @@
+= Service Virtualization
+:source-highlighter: highlightjs
+:icons: font
+
+[IMPORTANT]
+====
+The best way to guarantee that a test works is running it from build tool and not IDE.
+For this project means running `./gradlew clean test`
+====
+
+After learnt about service virtualization, let's explore another kind of tests for microservices called contract testing, which are useful for validating that you can deploy consumer and provider independentlly without fear of breaking the compatibility between them.
+
+IMPORTANT: By definition each microservice must be deployable independentlly so it is really important to have this in your design. Test can help to detect cases where services cannot be deployed independentlly before you deploy to production. But it is just a help hand.
+
+== Running services
+
+First thing that we are going to do is just run both services locally and validate that they can communicate each other correctly.
+Open two termianls and run next commands in each one:
+
+[source, bash]
+.Terminal 1
+----
+$ > cd crimes
+$ > ./gradlew shadowJar
+$ > java -jar build/libs/crimes-service-1.0-SNAPSHOT.jar
+----
+
+
+[source, bash]
+.Terminal 2
+----
+$ > cd villains
+$ > ./gradlew  shadowJar
+$ > java -jar -Dcrimes.host=localhost build/libs/villains-service-1.0-SNAPSHOT.jar
+----
+
+Then execute next command to validate that everything works as expected: `curl http://localhost:8081/villains/Gru` and you should see `{"name":"Gru","areaOfInfluence":"Worldwide","crimes":[{"name":"Moon","wikipedia":"https://en.wikipedia.org/wiki/Moon"},{"name":"Times Square JumboTron","wikipedia":"https://en.wikipedia.org/wiki/One_Times_Square"}]}`
+
+== Breaking the Environment
+
+Let's see how you can break current application by just deploying a new version of crimes service.
+
+Stop crimes service from terminal and open Crimes project into your IDE.
+
+Now open `src/main/java/org/lordofthejars/villains/crimes/Crime.java` class and comment next lines:
+
+[source, java]
+.src/main/java/org/lordofthejars/villains/crimes/Crime.java
+----
+public Crime(JsonObject jsonObject) {
+
+    if (jsonObject.containsKey("NAME")) {
+        this.name = jsonObject.getString("NAME");
+    }
+
+    if (jsonObject.containsKey("VILLAIN")) {
+        this.villain = jsonObject.getString("VILLAIN");
+    }
+
+    /**if (jsonObject.containsKey("WIKI")) {
+        this.wiki = jsonObject.getString("WIKI");
+    }**/
+
+}
+----
+
+Then let's deploy this new version.
+
+[source, bash]
+----
+$ > ./gradlew clean compileJava shadowJar
+$ > java -jar build/libs/crimes-service-1.0-SNAPSHOT.jar
+----
+
+And run again `curl http://localhost:8081/villains/Gru` and you should see `Internal Server Error`.
+
+So you've break `villains` service without any redeploy on it.
+Also it is important to notice that even with a lot of tests in `crimes` service you would not be able to detect this failure since it is how `villains` service is implemented.
+
+Uncomment again previous lines and let's see how we could detect this failure before deploying the crimes service.
+
+[source, java]
+.src/main/java/org/lordofthejars/villains/crimes/Crime.java
+----
+public Crime(JsonObject jsonObject) {
+
+    if (jsonObject.containsKey("NAME")) {
+        this.name = jsonObject.getString("NAME");
+    }
+
+    if (jsonObject.containsKey("VILLAIN")) {
+        this.villain = jsonObject.getString("VILLAIN");
+    }
+
+    if (jsonObject.containsKey("WIKI")) {
+        this.wiki = jsonObject.getString("WIKI");
+    }
+
+}
+----
+
+== Contract Tests
+
+=== Villains Consumer Driven Contract (Consumer-Side)
+
+In Consumer-Driven contracts the consumer is the one who has the ownership of the contract.
+
+There are several Consumer-Driven contracts, butin this case we are going to use a well-known called Pact and Pact-JVM, together with Arquillian Algeron which is a wrapper around Pact offering some integrations with Arquillian ecosystem butalso some extra features not provided by Pact.
+
+So first thing you need to do is add Arquillian Algeron and Pact dependencies.
+Add next lines in each of the sections of `build.gradle` file:
+
+[source, groovy]
+.build.gradle
+----
+plugins {
+    id "io.spring.dependency-management" version '1.0.3.RELEASE'
+}
+
+project.ext {
+    pactVersion = '3.5.11'
+    algeronVersion = '2.0.0-rc.3'
+}
+
+dependencyManagement {
+    imports {
+       mavenBom 'org.jboss.arquillian:arquillian-bom:1.2.0.Final'
+    }
+}
+
+dependencies {
+    testCompile 'org.assertj:assertj-core:3.8.0'
+    testCompile 'org.jboss.arquillian.junit:arquillian-junit-standalone'
+    testCompile "org.arquillian.algeron:arquillian-algeron-pact-consumer-core:${project.ext.algeronVersion}"
+    testCompile "au.com.dius:pact-jvm-consumer_2.11:${project.ext.pactVersion}"
+}
+----
+
+After that we need to configure where contracts should be stored. 
+For this particular case, and for sake of simplicity, you are going to store contracts locally, but in a real case you would use git repo or pact broker.
+You can read more about this at http://arquillian.org/arquillian-algeron/#_arquillian_algeron_consumer_publisher
+
+So let's configure local folder as place to publish contracts.
+Create next file at `src/test/resources/arquillian.xml`:
+
+[source, xml]
+.src/test/resources/arquillian.xml
+----
+<?xml version="1.0"?>
++<arquillian xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns="http://jboss.org/schema/arquillian"
+    xsi:schemaLocation="http://jboss.org/schema/arquillian
+    http://jboss.org/schema/arquillian/arquillian_1_0.xsd">
+
+  <extension qualifier="algeron-consumer">
+    <property name="publishContracts">${env.publishcontracts:true}</property> <!-- 1 -->
+    <property name="publishConfiguration">
+      provider: folder <!-- 2 -->
+      outputFolder: ~/crimescontract <!-- 3 -->
+      contractsFolder: build/pacts <!-- 4 -->
+      deleteFolder: true
+    </property>
+  </extension>
+
+</arquillian>
+----
+<1> You can define if you want to publish contracts or not
+<2> Publish contracts in local folder
+<3> Location where to publish contracts
+<4> Folder where contracts are generated
+
+Then you can write a consumer test which will be used to generate the contract:
+
+[source, java]
+----
+package org.lordofthejars.villains.villain;
+
+import au.com.dius.pact.consumer.dsl.PactDslWithProvider;
+import au.com.dius.pact.model.RequestResponsePact;
+import io.vertx.core.DeploymentOptions;
+import io.vertx.core.Vertx;
+import io.vertx.core.json.JsonArray;
+import io.vertx.core.json.JsonObject;
+import io.vertx.rxjava.ext.web.client.WebClient;
+import java.net.URL;
+import java.util.concurrent.CountDownLatch;
+import org.arquillian.algeron.consumer.StubServer;
+import org.arquillian.algeron.pact.consumer.spi.Pact;
+import org.arquillian.algeron.pact.consumer.spi.PactVerification;
+import org.jboss.arquillian.junit.Arquillian;
+import org.junit.BeforeClass;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import rx.Single;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
+
+@RunWith(Arquillian.class) // <1>
+public class CrimesConsumerContractTest {
+
+    private static Vertx vertx;
+
+    @StubServer // <2>
+    URL pactServer;
+
+    @Pact(provider = "crimes", consumer = "villains") // <3>
+    public RequestResponsePact returnListOfCrimes(PactDslWithProvider builder) {
+
+        return builder
+            .uponReceiving("Gru villain to get all Crimes")
+            .path("/crimes/Gru")
+            .method("GET")
+            .willRespondWith()
+            .status(200)
+            .body(RESPONSE)
+            .toPact();
+    }
+
+    @Test
+    @PactVerification("crimes") // <4>
+    public void should_get_list_of_crimes_by_villain() {
+
+        // given
+        final WebClient webClient = WebClient.create(new io.vertx.rxjava.core.Vertx(vertx));
+        CrimesGateway crimesGateway = new CrimesGateway(webClient, pactServer);
+
+        // when
+        final Single<JsonArray> gruCrimes = crimesGateway.getCrimesByVillainName("Gru");
+        final JsonArray crimes = gruCrimes.toBlocking().value();
+
+        // then
+        assertThat(crimes)
+            .extracting(crime -> ((JsonObject)crime).getString("name"), crime -> ((JsonObject)crime).getString("wiki"))
+            .contains(tuple("Moon", "https://en.wikipedia.org/wiki/Moon"), tuple("Times Square JumboTron", "https://en.wikipedia.org/wiki/One_Times_Square"));
+    }
+
+
+    @BeforeClass
+    public static void deployVerticle() throws InterruptedException {
+        final CountDownLatch waitVerticleDeployed = new CountDownLatch(1);
+
+        new Thread(() -> {
+            vertx = Vertx.vertx();
+            DeploymentOptions deploymentOptions = new DeploymentOptions().
+                setConfig(new JsonObject()
+                    .put("services.crimes.host", "crimes")
+                    .put("services.crimes.port", 9090));
+
+            vertx.deployVerticle(VillainsVerticle.class.getName(), deploymentOptions, event -> {
+                if (event.failed()) {
+                    throw new IllegalStateException("Cannot deploy Villains Verticle");
+                }
+                waitVerticleDeployed.countDown();
+            });
+        }).start();
+        waitVerticleDeployed.await();
+    }
+
+    private static String RESPONSE = "[\n"
+        + "    {\n"
+        + "        \"name\": \"Moon\",\n"
+        + "        \"villain\": \"Gru\",\n"
+        + "        \"wiki\": \"https://en.wikipedia.org/wiki/Moon\"\n"
+        + "    },\n"
+        + "    {\n"
+        + "        \"name\": \"Times Square JumboTron\",\n"
+        + "        \"villain\": \"Gru\",\n"
+        + "        \"wiki\": \"https://en.wikipedia.org/wiki/One_Times_Square\"\n"
+        + "    }\n"
+        + "]";
+}
+----
+<1> Marks test as Arquillian test
+<2> Injects the URL where stub server is up and running
+<3> Defines the operation between the consumer and the provider
+<4> Sets which provider we want to generate contract
+
+Notice that this is very similar as Service Virtualization since you are not making calls to real service but into a stubbed service with canned answers.
+
+In this case, response is hardcoded as string message, but Pact offers a Java DSL to be able to generate answers programmatically.
+Also it allows you to define generic expressions such as _field wiki should be a URL_ so any URL matches.
+
+TIP: In our opinion service virtualization should be only used for service that are out of scope of the aplication such as external services or crosscut services such as OAuth protocol.
+
+Then you can run the test, and if you execute `~/crimescontract/villains-crimes.json` you should see the generated contract that is used to validate provider side.
+
+=== Crimes Consumer Driven Contract (Provider-Side)
+

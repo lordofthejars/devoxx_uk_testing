@@ -118,7 +118,7 @@ First of all open `build.gradle` and add Hoverfly dependency in `dependencies` s
 .build.gradle
 ----
 dependencies {
-    testCompile "io.specto:hoverfly-java:0.10.2"
+    testCompile "io.specto:hoverfly-java:0.10.3"
 }
 ----
 

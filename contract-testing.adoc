@@ -287,3 +287,130 @@ Then you can run the test, and if you execute `~/crimescontract/villains-crimes.
 
 === Crimes Consumer Driven Contract (Provider-Side)
 
+The provider side just readthe contract generated in consumer side, and replay all the interactions.
+If provider service is able to produce expected valid responses for contract requests, then we can be sure that both consumer and provider are going to be able to communicate correctly.
+
+So first thing you need to do is add Arquillian Algeron and Pact dependencies.
+Add next lines in each of the sections of `build.gradle` file:
+
+[source, groovy]
+.build.gradle
+----
+plugins {
+    id "io.spring.dependency-management" version '1.0.3.RELEASE'
+}
+
+project.ext {
+    pactVersion = '3.5.11'
+    algeronVersion = '2.0.0-rc.3'
+}
+
+dependencies {
+    testCompile 'org.jboss.arquillian.junit:arquillian-junit-standalone'
+    testCompile "org.arquillian.algeron:arquillian-algeron-pact-provider-core:${project.ext.algeronVersion}"
+    testCompile "au.com.dius:pact-jvm-provider_2.11:${project.ext.pactVersion}"
+    testCompile "org.assertj:assertj-core:3.8.0"
+    testCompile "org.arquillian.algeron:arquillian-algeron-pact-provider-assertj:${project.ext.algeronVersion}"
+}
+----
+
+Then you need to just write the test that will replay contract against the real provider.
+
+[source, java]
+.src/test/java/org/lordofthejars/villains/crimes/CrimesContractTest.java
+----
+package org.lordofthejars.villains.crimes;
+
+import io.vertx.core.Vertx;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.concurrent.CountDownLatch;
+import org.arquillian.algeron.pact.provider.spi.Provider;
+import org.arquillian.algeron.pact.provider.spi.Target;
+import org.arquillian.algeron.provider.core.retriever.ContractsFolder;
+import org.jboss.arquillian.junit.Arquillian;
+import org.jboss.arquillian.test.api.ArquillianResource;
+import org.junit.BeforeClass;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+
+import static org.arquillian.algeron.pact.provider.assertj.PactProviderAssertions.assertThat;
+
+@RunWith(Arquillian.class) // <1>
+@Provider("crimes") // <2>
+@ContractsFolder("~/crimescontract") // <3>
+public class CrimesContractTest {
+
+    @ArquillianResource // <4>
+    Target target;
+
+    @Test
+    public void should_validate_contract() {
+        assertThat(target).withUrl(getCrimesServer()).satisfiesContract(); // <5>
+    }
+
+    private static Vertx vertx;
+
+
+    private URL getCrimesServer() {
+        try {
+            return new URL("http://localhost:8080");
+        } catch (MalformedURLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @BeforeClass // <6>
+    public static void deployVerticle() throws InterruptedException {
+        final CountDownLatch waitVerticleDeployed = new CountDownLatch(1);
+
+        new Thread(() -> {
+            vertx = Vertx.vertx();
+            vertx.deployVerticle(CrimesVerticle.class.getName(), event -> {
+                if (event.failed()) {
+                    throw new IllegalStateException("Cannot deploy Crimes Verticle");
+                }
+                waitVerticleDeployed.countDown();
+            });
+        }).start();
+        waitVerticleDeployed.await();
+    }
+
+}
+----
+<1> Arquillian runner
+<2> Sets the name of the provider under test
+<3> Sets location of contracts
+<4> Http client which reads the contract and replay interactions
+<5> AssertJ that asserts that replied interactions meet the contract
+<6> Starts real provider service
+
+And then run the test, and you should see that this test passes since the contract is aligned with provider.
+
+Let's try to break provider now as we did <<Breaking the Environment, before>>.
+So comment again the _wiki_ field:
+
+[source, java]
+.src/main/java/org/lordofthejars/villains/crimes/Crime.java
+----
+public Crime(JsonObject jsonObject) {
+
+    if (jsonObject.containsKey("NAME")) {
+        this.name = jsonObject.getString("NAME");
+    }
+
+    if (jsonObject.containsKey("VILLAIN")) {
+        this.villain = jsonObject.getString("VILLAIN");
+    }
+
+    /**if (jsonObject.containsKey("WIKI")) {
+        this.wiki = jsonObject.getString("WIKI");
+    }**/
+
+}
+----
+
+Now you just need to re-run previous test again.
+And of course now the test is failing because `wiki` field was expected.
+
+So now you are able to detect any break compatibility of the API before deploying the service.

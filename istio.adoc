@@ -1,0 +1,326 @@
+= Testig in Production
+:source-highlighter: highlightjs
+:icons: font
+
+IMPORTANT: This part is an excerpt of https://github.com/redhat-developer-demos/istio-tutorial
+
+== Prerequisite CLI tools
+
+You will need in this tutorial:
+
+* `minishift` 
+** https://github.com/minishift/minishift/releases[Mac OS and Fedora]
+* docker
+** https://www.docker.com/docker-mac[Mac OS]
+** Fedora: `dnf install docker`
+* kubectl
+** https://kubernetes.io/docs/tasks/tools/install-kubectl/#install-kubectl-binary-via-curl[Mac OS]
+** Fedora: `dnf install kubernetes-client`
+* `oc (eval $(minishift oc-env))`
+* Apache Maven
+** https://archive.apache.org/dist/maven/maven-3/3.3.9/binaries/apache-maven-3.3.9-bin.tar.gz[Mac OS]
+** Fedora: `dnf install maven`
+* link:https://github.com/wercker/stern[stern]
+** Mac OS: `brew install stern`
+** Fedora: `sudo curl --output /usr/local/bin/stern -L https://github.com/wercker/stern/releases/download/1.6.0/stern_linux_amd64 && sudo chmod +x /usr/local/bin/stern`
+* istioctl (will be installed via the steps below)
+* `curl`, `gunzip`, `tar` 
+** Mac OS: built-in or part of your bash shell
+** Fedora: should also be installed already, but just in case... `dnf install curl gzip tar`
+* git
+** `dnf install git`
+
+== Setup minishift
+
+Assumes `minishift`, tested with minishift v1.15.1+a5c47dd
+
+[source,bash]
+----
+#!/bin/bash
+
+# add the location of minishift execuatable to PATH
+# I also keep other handy tools like kubectl and kubetail.sh
+# in that directory
+
+minishift profile set istio-tutorial
+minishift config set memory 8GB
+minishift config set cpus 3
+minishift config set vm-driver virtualbox ## or kvm, for Fedora
+minishift config set image-caching true
+minishift addon enable admin-user
+
+minishift start
+----
+
+== Setup environment
+
+[source,bash]
+----
+eval $(minishift oc-env)
+eval $(minishift docker-env)
+oc login $(minishift ip):8443 -u admin -p admin
+----
+
+NOTE: In this tutorial, you will often be polling the customer endpoint with `curl`, while simultaneously viewing logs via `stern` or `kubetail.sh` and issuing commands via `oc` and `istioctl`. Consider using three terminal windows.
+
+== Istio installation script
+
+[source,bash]
+----
+#!/bin/bash
+
+# Mac OS:
+curl -L https://github.com/istio/istio/releases/download/0.6.0/istio-0.6.0-osx.tar.gz | tar xz
+
+# Fedora:
+curl -L https://github.com/istio/istio/releases/download/0.6.0/istio-0.6.0-linux.tar.gz | tar xz
+
+# Both:
+cd istio-0.6.0
+export ISTIO_HOME=`pwd`
+export PATH=$ISTIO_HOME/bin:$PATH
+
+----
+
+[source,bash]
+----
+oc login $(minishift ip):8443 -u admin -p admin
+oc adm policy add-scc-to-user anyuid -z istio-ingress-service-account -n istio-system
+oc adm policy add-scc-to-user anyuid -z default -n istio-system
+oc adm policy add-scc-to-user anyuid -z grafana -n istio-system
+oc adm policy add-scc-to-user anyuid -z prometheus -n istio-system
+oc create -f install/kubernetes/istio.yaml
+oc project istio-system
+oc expose svc istio-ingress
+oc apply -f install/kubernetes/addons/prometheus.yaml
+oc apply -f install/kubernetes/addons/grafana.yaml
+oc apply -f install/kubernetes/addons/servicegraph.yaml
+oc expose svc servicegraph
+oc expose svc grafana
+oc expose svc prometheus
+oc process -f https://raw.githubusercontent.com/jaegertracing/jaeger-openshift/master/all-in-one/jaeger-all-in-one-template.yml | oc create -f -
+----
+
+Wait for Istio's components to be ready
+
+[source,bash]
+----
+$ oc get pods -w
+NAME                             READY     STATUS    RESTARTS   AGE
+grafana-3617079618-4qs2b         1/1       Running   0          4m
+istio-ca-1363003450-tfnjp        1/1       Running   0          4m
+istio-ingress-1005666339-vrjln   1/1       Running   0          4m
+istio-mixer-465004155-zn78n      3/3       Running   0          5m
+istio-pilot-1861292947-25hnm     2/2       Running   0          4m
+jaeger-210917857-2w24f           1/1       Running   0          4m
+prometheus-168775884-dr5dm       1/1       Running   0          4m
+servicegraph-1100735962-tdh78    1/1       Running   0          4m
+----
+
+And if you need quick access to the OpenShift console
+
+[source,bash]
+----
+minishift console
+----
+
+NOTE: On your first launch of the OpenShift console via `minishift`, you will receive a warning like "Your connection is not private". For our demo, simply select "Proceed to 192.168.xx.xx (unsafe)" to bypass the warning. Both the username and the password are set to `admin`, thanks to the `admin-user` add-on.
+
+== Deploy customer
+
+Make sure you are logged in
+
+[source,bash]
+----
+oc whoami
+----
+
+and you have setup the project/namespace
+
+[source,bash]
+----
+oc new-project tutorial
+oc adm policy add-scc-to-user privileged -z default -n tutorial
+----
+
+Then clone the git repository
+
+[source,bash]
+----
+git clone https://github.com/redhat-developer-demos/istio-tutorial
+cd istio-tutorial
+----
+
+Start deploying the microservice projects, starting with customer
+
+[source,bash]
+----
+cd customer/java/springboot
+mvn clean package
+docker build -t example/customer .
+docker images | grep customer
+----
+
+NOTE: Your very first Docker build will take a bit of time as it downloads all the layers. Subsequent rebuilds of the Docker image, updating only the microservice layer will be very fast.
+
+Make sure `istioctl` is in your `PATH`:
+
+[source,bash]
+----
+$ istioctl version
+Version: 0.6.0
+GitRevision: 2cb09cdf040a8573330a127947b11e5082619895
+User: root@a28f609ab931
+Hub: docker.io/istio
+GolangVersion: go1.9
+BuildStatus: Clean
+----
+
+Now let's deploy the customer pod with its sidecar
+
+[source,bash]
+----
+oc apply -f <(istioctl kube-inject -f ../../kubernetes/Deployment.yml) -n tutorial
+oc create -f ../../kubernetes/Service.yml -n tutorial
+----
+
+Since the `customer` service is the one our users will interact with, let's add an OpenShift Route that exposes that endpoint.
+
+[source,bash]
+----
+oc expose service customer
+oc get route
+oc get pods -w
+----
+
+IMPORTANT: If your pod fails with `ImagePullBackOff`, it's possible that your current terminal isn't using the proper Docker Environment. See link:#setup-environment[Setup environment].
+
+Wait until the status is `Running` and there are `2/2` pods in the `Ready` column. To exit, press `Ctrl+C`
+
+Then test the customer endpoint
+
+[source,bash]
+----
+curl customer-tutorial.$(minishift ip).nip.io
+----
+
+You should see the following error because the services `preference` and `recommendation` are not yet deployed.
+
+----
+customer => I/O error on GET request for "http://preference:8080": preference; nested exception is java.net.UnknownHostException: preference
+----
+
+Also review the logs
+
+[source,bash]
+----
+stern customer -c customer
+----
+
+You should see a stacktrace containing this cause:
+
+[source,bash]
+----
+org.springframework.web.client.ResourceAccessException: I/O error on GET request for "http://preference:8080": preference; nested exception is java.net.UnknownHostException: preference
+----
+
+Back to the main istio-tutorial directory
+
+[source,bash]
+----
+cd ../../..
+----
+
+== Deploy preference
+
+[source,bash]
+----
+cd preference/java/springboot
+mvn clean package
+docker build -t example/preference .
+docker images | grep preference
+oc apply -f <(istioctl kube-inject -f ../../kubernetes/Deployment.yml) -n tutorial
+oc create -f ../../kubernetes/Service.yml
+oc get pods -w
+----
+
+Wait until the status is `Running` and there are `2/2` pods in the `Ready` column. To exit, press `Ctrl+C`
+
+[source,bash]
+----
+curl customer-tutorial.$(minishift ip).nip.io
+----
+
+It will respond with an error since the service `recommendation` is not yet deployed.
+
+NOTE: We could make this a bit more resilent in a future iteration of this tutorial
+
+[source,bash]
+----
+customer => 503 preference => I/O error on GET request for "http://recommendation:8080": recommendation; nested exception is java.net.UnknownHostException: recommendation
+----
+
+and check out the logs
+
+[source,bash]
+----
+stern preference -c preference
+----
+
+You should see a stacktrace containing this cause:
+
+[source,bash]
+----
+org.springframework.web.client.ResourceAccessException: I/O error on GET request for "http://recommendation:8080": recommendation; nested exception is java.net.UnknownHostException: recommendation
+----
+
+Back to the main istio-tutorial directory
+
+[source,bash]
+----
+cd ../../..
+----
+
+== Deploy recommendation
+
+IMPORTANT: The tag `v1` at the end of the image name matters. We will be creating a `v2` version of `recommendation` later in this tutorial. Having both a `v1` and `v2` version of the `recommendation` code will allow us to exercise some interesting aspects of Istio's capabilities.
+
+[source,bash]
+----
+cd recommendation/java/vertx
+mvn clean package
+docker build -t example/recommendation:v1 .
+docker images | grep recommendation
+oc apply -f <(istioctl kube-inject -f ../../kubernetes/Deployment.yml) -n tutorial
+oc create -f ../../kubernetes/Service.yml
+oc get pods -w
+----
+
+Wait until the status is `Running` and there are `2/2` pods in the `Ready` column. To exit, press `Ctrl+C`
+
+[source,bash]
+----
+curl customer-tutorial.$(minishift ip).nip.io
+----
+
+it should now return
+
+[source,bash]
+----
+customer => preference => recommendation v1 from '99634814-sf4cl': 1
+----
+
+and you can monitor the `recommendation` logs with
+
+[source,bash]
+----
+stern recommendation -c recommendation
+----
+
+Back to the main `istio-tutorial` directory
+
+[source,bash]
+----
+cd ../../..
+----
+

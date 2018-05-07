@@ -431,7 +431,7 @@ cd ../../..
 
 == Changing Istio RouteRules
 
-==== All users to recommendation:v2
+=== All users to recommendation:v2
 
 From the main istio-tutorial directory,
 
@@ -444,7 +444,7 @@ curl customer-tutorial.$(minishift ip).nip.io
 
 you should only see v2 being returned
 
-==== All users to recommendation:v1
+=== All users to recommendation:v1
 
 Note: "replace" instead of "create" since we are overlaying the previous rule
 
@@ -457,7 +457,7 @@ istioctl get routerules -n tutorial
 istioctl get routerule recommendation-default -o yaml -n tutorial
 ----
 
-==== All users to recommendation v1 and v2
+=== All users to recommendation v1 and v2
 
 By simply removing the rule
 
@@ -473,7 +473,7 @@ and you should see the default behavior of load-balancing between v1 and v2
 curl customer-tutorial.$(minishift ip).nip.io
 ----
 
-==== Split traffic between v1 and v2 (Canary Deployment)
+=== Split traffic between v1 and v2 (Canary Deployment)
 
 Canary Deployment scenario: push v2 into the cluster but slowly send end-user traffic to it, if you continue to see success, continue shifting more traffic over time
 
@@ -517,14 +517,14 @@ Clean up
 istioctl delete routerule recommendation-v1-v2 -n tutorial
 ----
 
-==== Set recommendation to all v1
+=== Set recommendation to all v1
 
 [source,bash]
 ----
 istioctl create -f istiofiles/route-rule-recommendation-v1.yml -n tutorial
 ----
 
-==== Set Safari users to v2 (Canary Release)
+=== Set Safari users to v2 (Canary Release)
 
 [source,bash]
 ----
@@ -578,7 +578,7 @@ Remove the Safari rule
 istioctl delete routerule recommendation-safari -n tutorial
 ----
 
-==== Set mobile users to v2
+=== Set mobile users to v2
 
 [source,bash]
 ----
@@ -587,7 +587,7 @@ istioctl create -f istiofiles/route-rule-mobile-recommendation-v2.yml -n tutoria
 curl -A "Mozilla/5.0 (iPhone; U; CPU iPhone OS 4(KHTML, like Gecko) Version/5.0.2 Mobile/8J2 Safari/6533.18.5" curl -A Safari customer-tutorial.$(minishift ip).nip.io
 ----
 
-==== Clean up
+=== Clean up
 
 [source,bash]
 ----
@@ -627,7 +627,7 @@ Check the logs of recommendation-v2
 oc logs -f `oc get pods|grep recommendation-v2|awk '{ print $1 }'` -c recommendation
 ----
 
-==== Clean up
+=== Clean up
 
 [source,bash]
 ----

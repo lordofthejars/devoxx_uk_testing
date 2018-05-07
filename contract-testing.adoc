@@ -153,11 +153,11 @@ Create next file at `src/test/resources/arquillian.xml`:
     http://jboss.org/schema/arquillian/arquillian_1_0.xsd">
 
   <extension qualifier="algeron-consumer">
-    <property name="publishContracts">${env.publishcontracts:true}</property> <!-- 1 -->
+    <property name="publishContracts">${env.publishcontracts:true}</property> <!--1-->
     <property name="publishConfiguration">
-      provider: folder <!-- 2 -->
-      outputFolder: ~/crimescontract <!-- 3 -->
-      contractsFolder: build/pacts <!-- 4 -->
+      provider: folder <!--2-->
+      outputFolder: ~/crimescontract <!--3-->
+      contractsFolder: build/pacts <!--4-->
       deleteFolder: true
     </property>
   </extension>
